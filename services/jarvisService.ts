@@ -137,15 +137,18 @@ export class JarvisService {
     };
 
     this.recognition.onerror = (event: any) => {
-       // if (event.error === 'not-allowed') {
-       //    this.onLog("MICROPHONE ACCESS DENIED. CHECK PERMISSIONS.", "SYSTEM");
-       // }
+       // Silently handle errors to prevent log spamming, unless critical
     };
     
     this.recognition.onend = () => {
+       // Only restart if we are truly disconnected and explicitly want to listen
        if (this.isWakeWordActive && this.connectionState === ConnectionState.DISCONNECTED) {
            setTimeout(() => {
-               try { this.recognition.start(); } catch(e) {}
+               try { 
+                 if (this.isWakeWordActive && this.connectionState === ConnectionState.DISCONNECTED) {
+                    this.recognition.start(); 
+                 }
+               } catch(e) {}
            }, 1000);
        }
     };
@@ -159,7 +162,7 @@ export class JarvisService {
       this.recognition?.start();
       this.onLog("Standby mode engaged. Listening for 'Activate System'...", "SYSTEM");
     } catch (e) {
-      // Ignore
+      // Ignore if already started
     }
   }
 
@@ -182,35 +185,46 @@ export class JarvisService {
       // 1. Stop Wake Word Listener
       this.stopWakeWordDetection();
       
-      // CRITICAL: Add delay to allow microphone hardware to be released by SpeechRecognition
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // CRITICAL: Add generous delay to allow microphone hardware to be released by SpeechRecognition
+      // Some mobile devices are slow to release the resource.
+      await new Promise(resolve => setTimeout(resolve, 800));
 
       this.updateState(ConnectionState.CONNECTING);
       this.onLog("Initializing Neural Uplink...", "SYSTEM");
 
       // Initialize Audio Contexts
-      this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Use fallback for AudioContext creation to handle browser differences
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      this.inputAudioContext = new AudioContextClass({ sampleRate: 16000 });
+      this.outputAudioContext = new AudioContextClass({ sampleRate: 24000 });
       this.nextStartTime = 0;
 
-      // Ensure Output Context is Running
-      if (this.outputAudioContext.state === 'suspended') {
+      // Ensure Output Context is Running (User Interaction Requirement)
+      if (this.outputAudioContext && this.outputAudioContext.state === 'suspended') {
         await this.outputAudioContext.resume();
       }
 
-      // Request Microphone
+      // Request Microphone with Fallback Strategy
       try {
-        this.stream = await navigator.mediaDevices.getUserMedia({ 
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            autoGainControl: true,
-            noiseSuppression: true
-          } 
-        });
+        try {
+            // Attempt 1: High quality settings
+            this.stream = await navigator.mediaDevices.getUserMedia({ 
+              audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                autoGainControl: true,
+                noiseSuppression: true
+              } 
+            });
+        } catch (err) {
+            console.warn("High-quality audio constraints failed, falling back to basic audio.");
+            // Attempt 2: Basic settings
+            this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
         this.onLog("Audio Input Sensors: ONLINE", "SYSTEM");
       } catch (e) {
-        throw new Error("Microphone access denied or device busy.");
+        this.onLog(`MIC ERROR: ${(e as Error).name} - ${(e as Error).message}`, "SYSTEM");
+        throw new Error("Microphone access denied or device busy. Please check permissions.");
       }
       
       // Initialize GoogleGenAI
@@ -262,10 +276,18 @@ export class JarvisService {
   private startAudioInputStream(sessionPromise: Promise<any>) {
     if (!this.inputAudioContext || !this.stream) return;
 
+    // Ensure context is running before creating sources
+    if (this.inputAudioContext.state === 'suspended') {
+      this.inputAudioContext.resume().catch(e => console.error("Failed to resume input context:", e));
+    }
+
     const source = this.inputAudioContext.createMediaStreamSource(this.stream);
     const processor = this.inputAudioContext.createScriptProcessor(4096, 1, 1);
 
     processor.onaudioprocess = (e) => {
+      // Safety check if we are still connected
+      if (this.connectionState !== ConnectionState.CONNECTED) return;
+
       const inputData = e.inputBuffer.getChannelData(0);
       const pcmBlob = createPcmBlob(inputData);
       
@@ -432,11 +454,29 @@ export class JarvisService {
   async disconnect() {
     this.stopWakeWordDetection();
     
-    if (this.stream) this.stream.getTracks().forEach(track => track.stop());
-    if (this.videoStream) this.videoStream.getTracks().forEach(track => track.stop());
+    // Stop all tracks
+    if (this.stream) {
+        this.stream.getTracks().forEach(track => {
+            track.stop();
+        });
+        this.stream = null;
+    }
+    if (this.videoStream) {
+        this.videoStream.getTracks().forEach(track => {
+            track.stop();
+        });
+        this.videoStream = null;
+    }
     
-    if (this.inputAudioContext?.state !== 'closed') await this.inputAudioContext?.close();
-    if (this.outputAudioContext?.state !== 'closed') await this.outputAudioContext?.close();
+    // Close contexts
+    if (this.inputAudioContext && this.inputAudioContext.state !== 'closed') {
+        await this.inputAudioContext.close();
+        this.inputAudioContext = null;
+    }
+    if (this.outputAudioContext && this.outputAudioContext.state !== 'closed') {
+        await this.outputAudioContext.close();
+        this.outputAudioContext = null;
+    }
     
     this.updateState(ConnectionState.DISCONNECTED);
     this.startWakeWordDetection();
