@@ -1,0 +1,8 @@
+{
+  "name": "J.A.R.V.I.S. Web Interface",
+  "description": "A fully interactive, voice-controlled AI assistant interface powered by Gemini 2.5 Live API.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
