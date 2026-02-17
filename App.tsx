@@ -9,15 +9,15 @@ const App: React.FC = () => {
   const [systemStatus, setSystemStatus] = useState<SystemStatus>({
     memory: 45,
     cpu: 12,
-    network: 'SECURE (Local)',
+    network: 'SECURE',
     securityLevel: 'HIGH',
     theme: 'BLUE'
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [audioData, setAudioData] = useState<Uint8Array | null>(null);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
   
-  // Use a ref to keep the service instance persistent across renders
   const jarvisRef = useRef<JarvisService | null>(null);
 
   const addLog = useCallback((message: string, source: 'SYSTEM' | 'USER' | 'J.A.R.V.I.S.') => {
@@ -29,32 +29,35 @@ const App: React.FC = () => {
         source, 
         message 
       }
-    ].slice(-50)); // Keep last 50 logs
+    ].slice(-50));
   }, []);
 
   useEffect(() => {
-    // Initialize Service on Mount
     const service = new JarvisService();
     jarvisRef.current = service;
 
-    // Bind callbacks
     service.onStateChange = (state) => setConnectionState(state);
     service.onLog = (msg, src) => addLog(msg, src);
     service.onSystemUpdate = (update) => setSystemStatus(prev => ({ ...prev, ...update }));
     service.onAudioData = (data) => setAudioData(data);
     service.onUserSpeaking = (speaking) => setIsUserSpeaking(speaking);
 
-    // Initial log
-    addLog("System initialized. Waiting for user authorization.", "SYSTEM");
+    addLog("J.A.R.V.I.S. Protocol Online. Waiting for command.", "SYSTEM");
+
+    service.initWakeWordDetection();
+    service.startWakeWordDetection();
+
+    // Clock Timer
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
 
     return () => {
       service.disconnect();
+      clearInterval(timer);
     };
   }, [addLog]);
 
   const handleToggleConnection = async () => {
     if (!jarvisRef.current) return;
-
     if (connectionState === ConnectionState.CONNECTED || connectionState === ConnectionState.CONNECTING) {
       await jarvisRef.current.disconnect();
     } else {
@@ -65,93 +68,85 @@ const App: React.FC = () => {
   const isConnected = connectionState === ConnectionState.CONNECTED;
   const isConnecting = connectionState === ConnectionState.CONNECTING;
   
-  // Dynamic theme based on voice activity or system setting
   const activeTheme = isUserSpeaking ? 'RED' : systemStatus.theme;
-
   const themeColor = activeTheme === 'BLUE' ? 'text-cyan-400' : 'text-red-500';
-  const buttonBorder = activeTheme === 'BLUE' ? 'border-cyan-500 hover:bg-cyan-500/20' : 'border-red-600 hover:bg-red-600/20';
-  
-  // Background grid colors
-  const gridColor = activeTheme === 'BLUE' ? '#003344' : '#441111';
+  const gridColor = activeTheme === 'BLUE' ? 'rgba(6, 182, 212, 0.1)' : 'rgba(239, 68, 68, 0.1)';
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center relative overflow-hidden bg-black selection:bg-cyan-900 selection:text-white">
+    <div className={`min-h-screen bg-black ${themeColor} font-rajdhani overflow-hidden relative selection:bg-cyan-500/30 flex flex-col`}>
       
       {/* Background Grid */}
       <div 
-        className="absolute inset-0 z-0 pointer-events-none opacity-20"
+        className="absolute inset-0 z-0 pointer-events-none"
         style={{
-          backgroundImage: `linear-gradient(${gridColor} 1px, transparent 1px), linear-gradient(90deg, ${gridColor} 1px, transparent 1px)`,
-          backgroundSize: '40px 40px'
+          backgroundImage: `
+            linear-gradient(${gridColor} 1px, transparent 1px), 
+            linear-gradient(90deg, ${gridColor} 1px, transparent 1px)
+          `,
+          backgroundSize: '50px 50px',
+          maskImage: 'radial-gradient(circle at center, black 40%, transparent 100%)' // Inverted mask for corners
         }}
       />
       
-      <div className="z-10 w-full max-w-5xl flex flex-col items-center gap-8 p-4">
+      {/* Vignette */}
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,black_100%)] z-0"></div>
+
+      {/* Main UI Layer */}
+      <main className="relative z-10 flex-1 flex flex-col p-4 md:p-8 justify-between">
         
-        {/* Header */}
-        <header className="w-full flex justify-between items-end border-b border-gray-800 pb-4 mb-4">
-          <div>
-            <h1 className={`text-4xl md:text-6xl font-tech font-bold tracking-tighter ${themeColor} transition-colors duration-300`}>
+        {/* Top Header */}
+        <header className="flex justify-between items-start border-b border-white/10 pb-4">
+          <div className="flex flex-col">
+            <h1 className="text-4xl md:text-6xl font-orbitron font-bold tracking-widest leading-none">
               J.A.R.V.I.S.
             </h1>
-            <p className="text-gray-500 text-xs tracking-[0.3em] mt-1">JUST A RATHER VERY INTELLIGENT SYSTEM</p>
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-[10px] tracking-[0.5em] opacity-70 border px-1 border-current">MARK II</span>
+              <span className="text-[10px] opacity-50">AIzaSy... API LINKED</span>
+            </div>
           </div>
-          <div className="text-right">
-             <div className="text-xs text-gray-400 mb-1">STATUS</div>
-             <div className={`text-xl font-mono font-bold ${isConnected ? 'text-green-400' : 'text-gray-600'}`}>
+          
+          <div className="text-right font-mono flex flex-col items-end">
+             <div className="text-3xl font-bold">{currentTime.toLocaleTimeString([], {hour12: false})}</div>
+             <div className="text-xs opacity-60 tracking-widest">{currentTime.toLocaleDateString()}</div>
+             <div className={`mt-2 text-sm font-bold flex items-center gap-2 ${isConnected ? 'animate-pulse' : ''}`}>
+               {isConnected && <div className="w-2 h-2 rounded-full bg-current"></div>}
                {connectionState}
              </div>
           </div>
         </header>
 
-        {/* Visualizer Core */}
-        <div className="relative group cursor-pointer" onClick={handleToggleConnection}>
-          <ArcVisualizer 
-            isActive={isConnected} 
-            theme={activeTheme} 
-            audioData={audioData}
-          />
-          
-          {/* Central Button Overlay */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-             {!isConnected && !isConnecting && (
-               <span className={`animate-pulse font-mono text-xs ${themeColor}`}>INITIATE</span>
-             )}
-             {isConnecting && (
-                <span className={`animate-spin w-8 h-8 border-2 border-t-transparent rounded-full ${activeTheme === 'BLUE' ? 'border-cyan-400' : 'border-red-500'}`}></span>
-             )}
-          </div>
+        {/* Center Visualizer Area */}
+        <div className="flex-1 flex flex-col items-center justify-center relative min-h-[400px]">
+           {/* Decorative Brackets */}
+           <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-64 border-l border-r border-white/20 opacity-30 w-full max-w-3xl pointer-events-none"></div>
+
+           <div className="relative group cursor-pointer transition-transform duration-500 hover:scale-105" onClick={handleToggleConnection}>
+              <ArcVisualizer 
+                isActive={isConnected} 
+                theme={activeTheme} 
+                audioData={audioData}
+              />
+              
+              {/* Start Overlay */}
+              {!isConnected && !isConnecting && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="backdrop-blur-sm bg-black/50 border border-current px-6 py-2 rounded text-sm tracking-widest hover:bg-white/10 transition-colors">
+                    INITIALIZE SYSTEM
+                  </div>
+                </div>
+              )}
+           </div>
+
+           <div className="absolute bottom-10 font-mono text-xs tracking-[0.3em] opacity-50">
+              {isUserSpeaking ? ">>> ANALYZING AUDIO INPUT <<<" : ">>> STANDBY MODE <<<"}
+           </div>
         </div>
 
-        {/* Control Button */}
-        <button
-          onClick={handleToggleConnection}
-          disabled={isConnecting}
-          className={`
-            relative px-8 py-3 bg-transparent border-2 ${buttonBorder} 
-            ${themeColor} font-bold tracking-widest uppercase transition-all duration-300
-            hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed
-            group overflow-hidden
-          `}
-        >
-          <span className="relative z-10">
-            {isConnected ? 'Terminate Session' : 'Establish Uplink'}
-          </span>
-          {/* Hover Fill Effect */}
-          <div className={`absolute inset-0 transform scale-x-0 group-hover:scale-x-100 transition-transform origin-left duration-300 ease-out ${activeTheme === 'BLUE' ? 'bg-cyan-900/40' : 'bg-red-900/40'}`}></div>
-        </button>
-
-        {/* Info Panels */}
+        {/* Bottom Panel */}
         <InfoPanel logs={logs} status={systemStatus} theme={activeTheme} />
 
-        {/* Footer */}
-        <div className="text-gray-600 text-xs font-mono mt-8 opacity-50 text-center max-w-lg">
-          WARNING: SYSTEM RUNNING IN RESTRICTED WEB ENVIRONMENT. ACCESS TO MOBILE HARDWARE IS SIMULATED. 
-          <br/>
-          GEMINI 2.5 LIVE API // NATIVE AUDIO // REALTIME WEBSOCKET
-        </div>
-
-      </div>
+      </main>
     </div>
   );
 };

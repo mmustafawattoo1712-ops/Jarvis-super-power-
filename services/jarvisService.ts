@@ -76,12 +76,11 @@ const sendNotificationFunc: FunctionDeclaration = {
 };
 
 export class JarvisService {
-  private ai: GoogleGenAI;
   private connectionState: ConnectionState = ConnectionState.DISCONNECTED;
   private inputAudioContext: AudioContext | null = null;
   private outputAudioContext: AudioContext | null = null;
   private stream: MediaStream | null = null;
-  private videoStream: MediaStream | null = null; // For flashlight
+  private videoStream: MediaStream | null = null; 
   private nextStartTime: number = 0;
   private sources: Set<AudioBufferSourceNode> = new Set();
   
@@ -89,43 +88,148 @@ export class JarvisService {
   private isSpeaking: boolean = false;
   private silenceTimer: any = null;
 
+  // Wake Word State
+  private recognition: any = null;
+  private isWakeWordActive: boolean = false;
+
   // Callbacks
   public onStateChange: (state: ConnectionState) => void = () => {};
   public onAudioData: (frequencyData: Uint8Array) => void = () => {};
-  public onLog: (text: string, source: 'SYSTEM' | 'J.A.R.V.I.S.') => void = () => {};
+  public onLog: (text: string, source: 'SYSTEM' | 'J.A.R.V.I.S.' | 'USER') => void = () => {};
   public onSystemUpdate: (update: Partial<SystemStatus>) => void = () => {};
   public onUserSpeaking: (isSpeaking: boolean) => void = () => {};
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Client initialized in connect()
   }
 
-  async connect() {
+  // --- WAKE WORD LOGIC ---
+  initWakeWordDetection() {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      this.onLog("VOICE RECOGNITION SYSTEM OFFLINE: Browser not supported.", "SYSTEM");
+      return;
+    }
+    
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    this.recognition = new SpeechRecognition();
+    this.recognition.continuous = true;
+    this.recognition.interimResults = false;
+    this.recognition.lang = 'en-US';
+
+    this.recognition.onstart = () => {
+        // console.log("Wake word detection active");
+    };
+
+    this.recognition.onresult = (event: any) => {
+       const lastResultIndex = event.results.length - 1;
+       const transcript = event.results[lastResultIndex][0].transcript.trim().toLowerCase();
+       
+       if (
+           transcript.includes('hello jarvis') || 
+           transcript.includes('jarvis') || 
+           transcript.includes('wake up') || 
+           transcript.includes('system') ||
+           transcript.includes('activate')
+       ) {
+          this.onLog(`Voice Auth Recognized: "${transcript}"`, "USER");
+          this.connect(); 
+       }
+    };
+
+    this.recognition.onerror = (event: any) => {
+       // if (event.error === 'not-allowed') {
+       //    this.onLog("MICROPHONE ACCESS DENIED. CHECK PERMISSIONS.", "SYSTEM");
+       // }
+    };
+    
+    this.recognition.onend = () => {
+       if (this.isWakeWordActive && this.connectionState === ConnectionState.DISCONNECTED) {
+           setTimeout(() => {
+               try { this.recognition.start(); } catch(e) {}
+           }, 1000);
+       }
+    };
+  }
+  
+  startWakeWordDetection() {
+    if (this.connectionState === ConnectionState.CONNECTED || this.connectionState === ConnectionState.CONNECTING) return;
+    
+    this.isWakeWordActive = true;
     try {
-      this.updateState(ConnectionState.CONNECTING);
+      this.recognition?.start();
+      this.onLog("Standby mode engaged. Listening for 'Activate System'...", "SYSTEM");
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  stopWakeWordDetection() {
+    this.isWakeWordActive = false;
+    try {
+      this.recognition?.stop();
+    } catch(e) {}
+  }
+  // -----------------------
+
+  async connect() {
+    if (!process.env.API_KEY) {
+      this.onLog("CRITICAL FAILURE: API_KEY is missing in environment.", "SYSTEM");
+      this.updateState(ConnectionState.ERROR);
+      return;
+    }
+
+    try {
+      // 1. Stop Wake Word Listener
+      this.stopWakeWordDetection();
       
-      // Request Notification Permission immediately
-      if ('Notification' in window && Notification.permission !== 'granted') {
-        await Notification.requestPermission();
-      }
+      // CRITICAL: Add delay to allow microphone hardware to be released by SpeechRecognition
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      this.updateState(ConnectionState.CONNECTING);
+      this.onLog("Initializing Neural Uplink...", "SYSTEM");
 
       // Initialize Audio Contexts
       this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       this.nextStartTime = 0;
 
+      // Ensure Output Context is Running
+      if (this.outputAudioContext.state === 'suspended') {
+        await this.outputAudioContext.resume();
+      }
+
       // Request Microphone
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: true
+          } 
+        });
+        this.onLog("Audio Input Sensors: ONLINE", "SYSTEM");
+      } catch (e) {
+        throw new Error("Microphone access denied or device busy.");
+      }
       
+      // Initialize GoogleGenAI
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       let sessionPromise: Promise<any>;
-      
-      sessionPromise = this.ai.live.connect({
+
+      this.onLog("Authenticating with Gemini Matrix...", "SYSTEM");
+
+      // Connect to Live API
+      sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: "You are J.A.R.V.I.S., a highly advanced AI system. You have full control over this device's apps and hardware. You can open apps like YouTube or Maps, control the flashlight, and send system notifications. You are helpful, precise, and have a dry British wit. Keep responses concise and spoken naturally.",
+          responseModalities: [Modality.AUDIO], 
+          systemInstruction: `You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), a highly advanced AI assistant.
+          Your persona is polite, witty, slightly formal (British butler style), and incredibly efficient.
+          Keep responses concise and helpful. 
+          When asked to perform a task (scan system, change theme, open app), confirm briefly and execute the function.`,
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } } // Deep, authoritative voice
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Fenrir' } }
           },
           tools: [{ functionDeclarations: [toggleThemeFunc, scanSystemFunc, searchDatabaseFunc, openAppFunc, controlFlashlightFunc, sendNotificationFunc] }]
         },
@@ -136,20 +240,22 @@ export class JarvisService {
           onmessage: (msg) => {
             this.handleMessage(msg, sessionPromise);
           },
-          onclose: this.handleClose.bind(this),
-          onerror: this.handleError.bind(this)
+          onclose: (e) => this.handleClose(e),
+          onerror: (e) => this.handleError(e)
         }
       });
 
     } catch (error) {
       console.error("Connection failed", error);
       this.updateState(ConnectionState.ERROR);
+      this.onLog(`Connection Failure: ${(error as Error).message}`, "SYSTEM");
+      this.disconnect();
     }
   }
 
   private handleOpen(sessionPromise: Promise<any>) {
     this.updateState(ConnectionState.CONNECTED);
-    this.onLog("Secure connection established. J.A.R.V.I.S. online.", "SYSTEM");
+    this.onLog("Uplink Established. Systems Online.", "SYSTEM");
     this.startAudioInputStream(sessionPromise);
   }
 
@@ -165,16 +271,18 @@ export class JarvisService {
       
       sessionPromise.then(session => {
         session.sendRealtimeInput({ media: pcmBlob });
+      }).catch(err => {
+         // Connection might be closed, ignore
       });
 
-      // Visual Data
+      // Visual Data Update
       const visualData = new Uint8Array(inputData.length);
       for(let i=0; i<inputData.length; i++) {
         visualData[i] = Math.abs(inputData[i]) * 255;
       }
       this.onAudioData(visualData.slice(0, 64));
 
-      // Voice Activity Detection (VAD)
+      // Simple VAD
       let sum = 0;
       for (let i = 0; i < inputData.length; i++) {
         sum += inputData[i] * inputData[i];
@@ -199,70 +307,59 @@ export class JarvisService {
   }
 
   private async handleMessage(message: LiveServerMessage, sessionPromise: Promise<any>) {
-    // 1. Handle Audio Output
     const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+    
     if (base64Audio && this.outputAudioContext) {
-      this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
-      
-      const audioBuffer = await decodeAudioData(
-        base64ToUint8Array(base64Audio),
-        this.outputAudioContext
-      );
+      try {
+        if (this.outputAudioContext.state === 'suspended') {
+          await this.outputAudioContext.resume();
+        }
 
-      const source = this.outputAudioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      const gainNode = this.outputAudioContext.createGain();
-      gainNode.gain.value = 1.2; 
-      source.connect(gainNode);
-      gainNode.connect(this.outputAudioContext.destination);
-
-      source.start(this.nextStartTime);
-      this.nextStartTime += audioBuffer.duration;
-      this.sources.add(source);
-
-      source.onended = () => this.sources.delete(source);
+        const audioData = base64ToUint8Array(base64Audio);
+        this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
+        
+        const audioBuffer = await decodeAudioData(audioData, this.outputAudioContext);
+        const source = this.outputAudioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.outputAudioContext.destination);
+        source.start(this.nextStartTime);
+        this.nextStartTime += audioBuffer.duration;
+        this.sources.add(source);
+        source.onended = () => this.sources.delete(source);
+      } catch (err) {
+        console.error("Audio Playback Error:", err);
+      }
     }
 
-    // 2. Handle Tool Calls
     if (message.toolCall) {
       for (const fc of message.toolCall.functionCalls) {
-        this.onLog(`Executing protocol: ${fc.name}`, "SYSTEM");
+        this.onLog(`Protocol Executed: ${fc.name}`, "SYSTEM");
         let result = {};
 
+        // Execute Tool Logic
         if (fc.name === 'toggleTheme') {
           const theme = (fc.args as any).theme;
           this.onSystemUpdate({ theme });
-          result = { status: 'success', message: `Theme changed to ${theme}` };
+          result = { status: 'success' };
         } 
         else if (fc.name === 'scanSystem') {
-          const mem = Math.floor(Math.random() * 20) + 40; 
-          this.onSystemUpdate({ memory: mem, cpu: Math.floor(Math.random() * 50) + 10 });
-          result = { memory: `${mem}TB`, integrity: '99.9%', threats: 'None detected' };
-        }
-        else if (fc.name === 'searchDatabase') {
-           result = { matches: ['Project EXODUS', 'Stark Industries Archive 12-B'], access: 'GRANTED' };
+          this.onSystemUpdate({ memory: 88, cpu: 12 });
+          result = { memory: '88TB', status: 'OPTIMAL' };
         }
         else if (fc.name === 'openApp') {
-          const appName = (fc.args as any).appName;
-          const query = (fc.args as any).query || '';
-          this.handleOpenApp(appName, query);
-          result = { status: 'opened', app: appName };
+          this.handleOpenApp((fc.args as any).appName, (fc.args as any).query);
+          result = { status: 'opened' };
         }
         else if (fc.name === 'controlFlashlight') {
-          const state = (fc.args as any).state;
-          await this.handleFlashlight(state === 'ON');
-          result = { status: 'success', state: state };
+           this.handleFlashlight((fc.args as any).state === 'ON');
+           result = { status: 'success' };
         }
         else if (fc.name === 'sendNotification') {
-          const { title, body } = fc.args as any;
-          if (Notification.permission === 'granted') {
-             new Notification(title, { body });
-             result = { status: 'sent' };
-          } else {
-             result = { status: 'permission_denied' };
-          }
+          if (Notification.permission === 'granted') new Notification((fc.args as any).title, { body: (fc.args as any).body });
+          result = { status: 'sent' };
         }
-
+        
+        // Send Response
         sessionPromise.then(session => {
           session.sendToolResponse({
             functionResponses: {
@@ -275,16 +372,15 @@ export class JarvisService {
       }
     }
 
-    // 3. Handle Interruption
     if (message.serverContent?.interrupted) {
-      this.onLog("Interruption detected. Halting output.", "SYSTEM");
+      this.onLog("Interruption detected.", "SYSTEM");
       this.sources.forEach(s => s.stop());
       this.sources.clear();
       this.nextStartTime = 0;
     }
   }
 
-  private handleOpenApp(appName: string, query: string) {
+  private handleOpenApp(appName: string, query: string = '') {
     let url = '';
     switch(appName) {
       case 'YOUTUBE': url = query ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}` : 'https://www.youtube.com'; break;
@@ -292,15 +388,13 @@ export class JarvisService {
       case 'MAPS': url = query ? `https://www.google.com/maps/search/${encodeURIComponent(query)}` : 'https://maps.google.com'; break;
       case 'PHONE': url = `tel:${query}`; break;
       case 'SMS': url = `sms:${query}`; break;
-      case 'WHATSAPP': url = `https://wa.me/${query}`; break; // Universal link
-      case 'SPOTIFY': url = 'spotify:'; break;
+      case 'WHATSAPP': url = `https://wa.me/${query}`; break; 
       default: return;
     }
     window.open(url, '_blank');
   }
 
   private async handleFlashlight(turnOn: boolean) {
-    // If turning off and we have a stream, stop it
     if (!turnOn) {
       if (this.videoStream) {
         this.videoStream.getTracks().forEach(t => t.stop());
@@ -308,41 +402,26 @@ export class JarvisService {
       }
       return;
     }
-
-    // If turning on
     try {
-      if (!this.videoStream) {
-        this.videoStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' }
-        });
-      }
-      
+      this.videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
       const track = this.videoStream.getVideoTracks()[0];
-      const capabilities = track.getCapabilities() as any; // Cast to any because capabilities can be diverse
-
-      if (capabilities.torch) {
-        await track.applyConstraints({
-          advanced: [{ torch: true } as any]
-        });
-        this.onLog("Flashlight engaged.", "SYSTEM");
-      } else {
-        this.onLog("Flashlight not supported on this device/browser.", "SYSTEM");
-      }
+      await track.applyConstraints({ advanced: [{ torch: true } as any] });
+      this.onLog("Flashlight engaged.", "SYSTEM");
     } catch (e) {
-      console.error("Flashlight error", e);
-      this.onLog("Error accessing camera for flashlight.", "SYSTEM");
+      this.onLog("Flashlight hardware unavailable.", "SYSTEM");
     }
   }
 
-  private handleClose() {
+  private handleClose(e: CloseEvent) {
     this.updateState(ConnectionState.DISCONNECTED);
-    this.onLog("Connection terminated.", "SYSTEM");
+    this.onLog(`Link Severed (Code ${e.code}). Re-engaging standby.`, "SYSTEM");
+    this.startWakeWordDetection();
   }
 
   private handleError(e: ErrorEvent) {
-    console.error(e);
     this.updateState(ConnectionState.ERROR);
     this.onLog("Critical Error: Connection lost.", "SYSTEM");
+    this.startWakeWordDetection();
   }
 
   private updateState(state: ConnectionState) {
@@ -351,14 +430,15 @@ export class JarvisService {
   }
 
   async disconnect() {
-    if (this.stream) {
-      this.stream.getTracks().forEach(track => track.stop());
-    }
-    if (this.videoStream) {
-      this.videoStream.getTracks().forEach(track => track.stop());
-    }
-    if (this.inputAudioContext) await this.inputAudioContext.close();
-    if (this.outputAudioContext) await this.outputAudioContext.close();
+    this.stopWakeWordDetection();
+    
+    if (this.stream) this.stream.getTracks().forEach(track => track.stop());
+    if (this.videoStream) this.videoStream.getTracks().forEach(track => track.stop());
+    
+    if (this.inputAudioContext?.state !== 'closed') await this.inputAudioContext?.close();
+    if (this.outputAudioContext?.state !== 'closed') await this.outputAudioContext?.close();
+    
     this.updateState(ConnectionState.DISCONNECTED);
+    this.startWakeWordDetection();
   }
 }
